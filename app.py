@@ -1,9 +1,4 @@
 import streamlit as st
-# --- 診断用（確認したら削除してOK） ---
-with st.expander("診断情報（確認後に削除してください）", expanded=True):
-    st.write("Service Account:", st.secrets["gcp_service_account"]["client_email"])
-    st.write("sheet_url:", st.secrets["sheet_url"])
-
 import gspread
 from datetime import date
 
