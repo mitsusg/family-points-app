@@ -256,6 +256,23 @@ if role == "子ども":
 
 # --- 親画面 ---
 else:
+    # 親ロック（簡易）
+    ok = True
+    try:
+        required = st.secrets.get("parent_pass", "")
+    except Exception:
+        required = ""
+    if required:
+        if "parent_ok" not in st.session_state:
+            st.session_state.parent_ok = False
+        if not st.session_state.parent_ok:
+            inp = st.text_input("親パスコードを入力してください", type="password")
+            if st.button("UnLock"):
+                st.session_state.parent_ok = (inp == required)
+            if not st.session_state.parent_ok:
+                st.stop()
+
+else:
     colL, colR = st.columns([1,1.4])
     with colL:
         kid_label = st.selectbox("お子さんを選択", list(kid_map.keys()))
@@ -264,37 +281,71 @@ else:
         target_date = st.date_input("対象日", date.today())
 
     gdf = goals_for_kid(kid_id)
-    if gdf.empty:
-        st.info("まだ目標が登録されていません。")
-    else:
-        st.subheader(f"{kid_name} のチェック状況（{target_date.isoformat()}）")
-        df = df_checkins()
-        for _, g in gdf.iterrows():
-            # 現状の状態を取得
-            ch, ap = today_check_state(kid_id, g["id"]) if target_date==date.today() else (False, False)
-            # 過去日の場合は検索
-            if target_date != date.today() and not df.empty:
+        # 追加: 未承認だけ表示のフィルタ
+    show_only_pending = st.checkbox("未承認だけ表示", value=False)
+
+    # 当日/過去日のチェック状況をまとめて取得
+    df = df_checkins()
+    target_iso = target_date.isoformat()
+
+    # 当日・過去日どちらでも、表示時点の child_checked / parent_approved を算出
+    # （後続のループで使い回すために辞書化）
+    state_map = {}  # (goal_id) -> (child_checked, parent_approved)
+    for _, g in gdf.iterrows():
+        ch, ap = (False, False)
+        if target_date == date.today():
+            ch, ap = today_check_state(kid_id, g["id"])
+        else:
+            if not df.empty:
                 mask = (
-                    (df["date"]==target_date.isoformat()) &
-                    (df["kid_id"]==kid_id) &
-                    (df["goal_id"]==g["id"])
+                    (df["date"] == target_iso) &
+                    (df["kid_id"] == kid_id) &
+                    (df["goal_id"] == g["id"])
                 )
                 if mask.any():
                     r = df[mask].iloc[0]
                     ch, ap = bool(r["child_checked"]), bool(r["parent_approved"])
+        state_map[g["id"]] = (ch, ap)
 
-            c1, c2, c3 = st.columns([2.5,1.2,1])
-            c1.write(f'• {g["title"]}（{int(g["points"])}点）')
-            c2.write("自己チェック" if ch else "未チェック")
-            btn_text = "承認取消" if ap else "承認する"
-            if c3.button(btn_text, key=f"approve_{g['id']}"):
+    # 未承認だけ表示が ON なら gdf を絞り込む
+    if show_only_pending:
+        keep_ids = [gid for gid, (ch, ap) in state_map.items() if ch and not ap]
+        gdf = gdf[gdf["id"].isin(keep_ids)].reset_index(drop=True)
+
+    # 追加: 一括承認ボタン
+    if st.button("表示中の目標を一括承認する"):
+        for _, g in gdf.iterrows():
+            ch, ap = state_map.get(g["id"], (False, False))
+            # 子がチェック済みで未承認なら承認する
+            if ch and not ap:
                 upsert_checkin(
-                    target_date.isoformat(), kid_id, kid_name,
+                    target_iso, kid_id, kid_name,
                     g["id"], g["title"],
-                    set_parent=not ap,  # トグル
+                    set_parent=True,
                     points=int(g["points"])
                 )
-                st.experimental_rerun()
+        st.success("一括承認しました。")
+        st.experimental_rerun()
+
+    if gdf.empty:
+        st.info("まだ目標が登録されていません。")
+    else:
+            st.subheader(f"{kid_name} のチェック状況（{target_date.isoformat()}）")
+
+    for _, g in gdf.iterrows():
+        ch, ap = state_map.get(g["id"], (False, False))
+        c1, c2, c3 = st.columns([2.5, 1.2, 1])
+        c1.write(f'• {g["title"]}（{int(g["points"])}点）')
+        c2.write("自己チェック" if ch else "未チェック")
+        btn_text = "承認取消" if ap else "承認する"
+        if c3.button(btn_text, key=f"approve_{g['id']}"):
+            upsert_checkin(
+                target_iso, kid_id, kid_name,   # ← target_date.isoformat() の代わりに target_iso 変数を使用
+                g["id"], g["title"],
+                set_parent=not ap,  # トグル
+                points=int(g["points"])
+            )
+            st.experimental_rerun()
 
     # 合計表示
     ym = target_date.strftime("%Y-%m")
