@@ -134,7 +134,9 @@ def df_goals():
         df["points"] = pd.to_numeric(df["points"], errors="coerce").fillna(0).astype(int)
     if "active" in df.columns:
         df["active"] = df["active"].astype(str).str.lower().isin(["true","1","yes"])
-    return df[GOALS_H]
+    cols = GOALS_H + (["audience"] if "audience" in df.columns else [])
+    return df[cols]
+
 
 def df_checkins():
     ws = ws_checkins()
