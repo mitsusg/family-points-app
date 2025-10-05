@@ -272,7 +272,6 @@ else:
             if not st.session_state.parent_ok:
                 st.stop()
 
-else:
     colL, colR = st.columns([1,1.4])
     with colL:
         kid_label = st.selectbox("お子さんを選択", list(kid_map.keys()))
