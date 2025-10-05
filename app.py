@@ -215,39 +215,34 @@ def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
         ws.update_cell(r, CHECKINS_H.index("updated_at")+1, now)
 
 def goals_for_kid(kid_id: str, viewer: str = "child"):
-    """
-    カンマ区切りkid_id対応 / 共通ゴール対応 / audience(任意)対応
-      - kid_id 空欄 or 'all' → 全員
-      - kid_id が 'k1,k2' → その子たちだけ
-      - audience が 'child' / 'parent' / 'both'(既定) で出し分け
-    """
     g = df_goals().copy()
 
-    # 1) active フィルタ（true/1/yes を有効とみなす）
+    # 1) active フィルタ
     g["_active"] = g.get("active", "TRUE").astype(str).str.strip().str.lower()
     g = g[g["_active"].isin(["true", "1", "yes"])].drop(columns=["_active"])
 
     # 2) audience（任意列）で出し分け。無ければ both 扱い
-    audience_series = g.get("audience", "both").astype(str).str.strip().str.lower()
+    import pandas as pd
+    if "audience" in g.columns:
+        audience_series = g["audience"].astype(str).str.strip().str.lower()
+    else:
+        audience_series = pd.Series(["both"] * len(g), index=g.index)
+
     valid_for_viewer = audience_series.isin(["both", viewer])
     g = g[valid_for_viewer]
 
     # 3) kid_id のカンマ区切り対応 + 全員共通（空 or 'all'）
-    # 全角カンマも想定して置換 → 分割 → 配列化
     kid_id_raw = g.get("kid_id", "").astype(str).fillna("").str.replace("，", ",")
     g["_kid_ids"] = kid_id_raw.apply(lambda x: [i.strip() for i in x.split(",") if i.strip()])
 
     def is_target(row_ids: list[str]) -> bool:
-        if not row_ids:   # 空欄 → 全員共通
+        if not row_ids:
             return True
-        # 'all' が含まれていれば全員共通
         if any(i.lower() == "all" for i in row_ids):
             return True
-        # 指定の kid_id が含まれている
         return kid_id in row_ids
 
     g = g[g["_kid_ids"].apply(is_target)]
-
     return g.reset_index(drop=True)
 
 def monthly_total(kid_id, target_month):
