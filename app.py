@@ -134,8 +134,11 @@ def df_goals():
         df["points"] = pd.to_numeric(df["points"], errors="coerce").fillna(0).astype(int)
     if "active" in df.columns:
         df["active"] = df["active"].astype(str).str.lower().isin(["true","1","yes"])
-    cols = GOALS_H + (["audience"] if "audience" in df.columns else [])
-    return df[cols]
+    # audience列を確実に含める（無ければ"both"を追加）
+    if "audience" not in df.columns:
+        df["audience"] = "both"
+    return df[GOALS_H + ["audience"]]
+
 
 
 def df_checkins():
