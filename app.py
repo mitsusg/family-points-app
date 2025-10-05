@@ -73,22 +73,34 @@ def safe_get_all_records(ws, expected_headers: list[str]) -> list[dict]:
     if not vals:
         ws.update("1:1", [expected_headers])
         return []
-    headers = vals[0]
+
+    # 1行目＝ヘッダー
+    headers = [str(h).strip() for h in (vals[0] or [])]
     rows = vals[1:]
+
+    # ヘッダーが期待と異なる場合は修復
     if headers != expected_headers:
         ws.update("1:1", [expected_headers])
         headers = expected_headers
+
     if not rows:
         return []
-    df = pd.DataFrame(rows, columns=headers)
+
+    # ---- ここがポイント：行長をヘッダー数に合わせる ----
+    n = len(headers)
+    norm_rows = []
+    for r in rows:
+        r = list(r or [])
+        if len(r) < n:
+            r = r + [None] * (n - len(r))   # 足りない分を None でパディング
+        elif len(r) > n:
+            r = r[:n]                       # 余計な列は切り捨て
+        norm_rows.append(r)
+
+    df = pd.DataFrame(norm_rows, columns=headers)
     df = df.applymap(lambda x: None if (x is None or str(x).strip() == "") else x)
     return df.to_dict(orient="records")
 
-    # ヘッダが無いor崩れている場合の保険
-    first = ws.row_values(1)
-    if first != headers:
-        ws.update("1:1", [headers])
-    return ws
 
 # タブとヘッダ
 KIDS_H = ["id", "name", "grade", "active"]
