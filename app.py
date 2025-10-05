@@ -135,10 +135,20 @@ def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
 
 def goals_for_kid(kid_id):
     g = df_goals()
-    # 有効 & (共通 or 個別)
-    g = g[(g.get("active","TRUE").astype(str).str.lower()=="true") &
-          ((g["kid_id"]=="") | (g["kid_id"]==kid_id))]
+
+    # 有効なゴールだけを抽出
+    g = g[(g.get("active", "TRUE").astype(str).str.lower() == "true")]
+
+    # kid_id列をリスト化（カンマ区切り対応）
+    g["kid_ids"] = g["kid_id"].astype(str).fillna("").apply(
+        lambda x: [i.strip() for i in x.split(",") if i.strip()]
+    )
+
+    # kid_idが含まれている行（または共通ゴール）を抽出
+    g = g[(g["kid_id"] == "") | (g["kid_ids"].apply(lambda ids: kid_id in ids))]
+
     return g.reset_index(drop=True)
+
 
 def today_check_state(kid_id, goal_id):
     df = df_checkins()
