@@ -4,6 +4,14 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import date, datetime
 import pandas as pd
+import gspread
+
+# チェックイン用の標準ヘッダー（シートの1行目と完全一致にする）
+CHECKINS_H = [
+    "date", "kid_id", "kid_name", "goal_id", "goal_title",
+    "points", "child_checked", "parent_approved", "updated_at"
+]
+
 
 st.set_page_config(page_title="Family Points", page_icon="✅", layout="wide")
 
@@ -66,18 +74,37 @@ def df_goals():
     return df
 
 def df_checkins():
-    vals = ws_checkins().get_all_records()
-    df = pd.DataFrame(vals)
-    if df.empty:
+    """checkinsタブを安全に取得（存在しない・ヘッダー欠落でも落ちない）"""
+    try:
+        ws = ws_checkins()
+        vals = ws.get_all_records()
+        df = pd.DataFrame(vals)
+    except Exception as e:
+        st.warning(f"⚠️ checkinsの読み込みに失敗しました: {e}")
         df = pd.DataFrame(columns=CHECKINS_H)
+
+    # 空でも最低限のカラムを保証
+    for col in CHECKINS_H:
+        if col not in df.columns:
+            df[col] = None
+
     # 型調整
-    if "points" in df.columns:
-        df["points"] = pd.to_numeric(df["points"], errors="coerce").fillna(0).astype(int)
-    if "child_checked" in df.columns:
-        df["child_checked"] = df["child_checked"].astype(str).str.lower().isin(["true","1","yes"])
-    if "parent_approved" in df.columns:
-        df["parent_approved"] = df["parent_approved"].astype(str).str.lower().isin(["true","1","yes"])
+    df["points"] = pd.to_numeric(df.get("points", 0), errors="coerce").fillna(0).astype(int)
+    df["child_checked"] = df.get("child_checked", False).astype(str).str.lower().isin(["true","1","yes"])
+    df["parent_approved"] = df.get("parent_approved", False).astype(str).str.lower().isin(["true","1","yes"])
+
     return df
+
+def today_check_state(kid_id: str, goal_id: str):
+    df = df_checkins(kid_id)
+    if df.empty:
+        return False, False
+    today = date.today()
+    rec = df[(df["date"] == today) & (df["goal_id"] == goal_id)]
+    if rec.empty:
+        return False, False
+    row = rec.iloc[0]
+    return bool(row.get("child_checked", False)), bool(row.get("parent_approved", False))
 
 def seed_if_empty():
     # 最初の一回だけの種データ
