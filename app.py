@@ -1,21 +1,35 @@
 # app.py — Family Points (Google Sheets)
+import time
+import functools
+
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import date, datetime
 import pandas as pd
-import gspread
-
-# チェックイン用の標準ヘッダー（シートの1行目と完全一致にする）
-CHECKINS_H = [
-    "date", "kid_id", "kid_name", "goal_id", "goal_title",
-    "points", "child_checked", "parent_approved", "updated_at"
-]
-
 
 st.set_page_config(page_title="Family Points", page_icon="✅", layout="wide")
 
 # ========= Google Sheets =========
+@st.cache_resource
+# ========= Google Sheets =========
+
+# 小さなリトライ
+def retry(times=3, wait=0.6, exceptions=(gspread.exceptions.APIError,)):
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            last = None
+            for i in range(times):
+                try:
+                    return fn(*args, **kwargs)
+                except exceptions as e:
+                    last = e
+                    time.sleep(wait * (1.5 ** i))
+            raise last
+        return wrapper
+    return deco
+
 @st.cache_resource
 def get_client():
     info = st.secrets["gcp_service_account"]
@@ -23,20 +37,53 @@ def get_client():
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
 
-@st.cache_resource
-def get_sheet():
-    client = get_client()
+def _sheet_id_from_url() -> str:
     url = st.secrets["sheet_url"]
-    sheet_id = url.split("/d/")[1].split("/")[0]  # IDに変換
-    return client.open_by_key(sheet_id)
+    if "/d/" not in url:
+        raise ValueError("sheet_url は Google Sheets 共有URL（/d/<ID>/...）を指定してください")
+    return url.split("/d/")[1].split("/")[0]
 
-def get_ws(name, headers):
-    sh = get_sheet()
+@st.cache_resource  # ヘッダーもキーに含めキャッシュの齟齬を防ぐ
+def _get_ws_cached(sheet_id: str, name: str, headers_tuple: tuple):
+    client = get_client()
+    sh = client.open_by_key(sheet_id)
     try:
         ws = sh.worksheet(name)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=name, rows=1000, cols=len(headers))
-        ws.append_row(headers)
+        ws = sh.add_worksheet(title=name, rows=1000, cols=max(10, len(headers_tuple)))
+        ws.update("1:1", [list(headers_tuple)])
+        time.sleep(0.2)  # 作成直後の整合待ち
+    return ws
+
+@retry(times=3, wait=0.6)
+def get_ws(name: str, headers: list[str]):
+    sheet_id = _sheet_id_from_url()
+    ws = _get_ws_cached(sheet_id, name, tuple(headers))
+    # 1行目を検査・修復
+    first = ws.row_values(1)
+    if first != headers:
+        ws.update("1:1", [headers])
+        time.sleep(0.1)
+    return ws
+
+# 全レコードを安全に取得（ヘッダ崩れでも落ちない）
+@retry(times=3, wait=0.6)
+def safe_get_all_records(ws, expected_headers: list[str]) -> list[dict]:
+    vals = ws.get_all_values()
+    if not vals:
+        ws.update("1:1", [expected_headers])
+        return []
+    headers = vals[0]
+    rows = vals[1:]
+    if headers != expected_headers:
+        ws.update("1:1", [expected_headers])
+        headers = expected_headers
+    if not rows:
+        return []
+    df = pd.DataFrame(rows, columns=headers)
+    df = df.applymap(lambda x: None if (x is None or str(x).strip() == "") else x)
+    return df.to_dict(orient="records")
+
     # ヘッダが無いor崩れている場合の保険
     first = ws.row_values(1)
     if first != headers:
@@ -56,45 +103,40 @@ def ws_goals():   return get_ws("goals", GOALS_H)
 def ws_checkins():return get_ws("checkins", CHECKINS_H)
 
 # ========= Sheets ユーティリティ =========
+# ========= Sheets ユーティリティ =========
 def df_kids():
-    vals = ws_kids().get_all_records()
-    df = pd.DataFrame(vals)
+    ws = ws_kids()
+    recs = safe_get_all_records(ws, KIDS_H)
+    df = pd.DataFrame(recs)
     if df.empty:
-        df = pd.DataFrame(columns=KIDS_H)
-    return df
+        return pd.DataFrame(columns=KIDS_H)
+    return df[KIDS_H]
 
 def df_goals():
-    vals = ws_goals().get_all_records()
-    df = pd.DataFrame(vals)
+    ws = ws_goals()
+    recs = safe_get_all_records(ws, GOALS_H)
+    df = pd.DataFrame(recs)
     if df.empty:
         df = pd.DataFrame(columns=GOALS_H)
-    # 型調整
     if "points" in df.columns:
         df["points"] = pd.to_numeric(df["points"], errors="coerce").fillna(0).astype(int)
-    return df
+    if "active" in df.columns:
+        df["active"] = df["active"].astype(str).str.lower().isin(["true","1","yes"])
+    return df[GOALS_H]
 
 def df_checkins():
-    """checkinsタブを安全に取得（存在しない・ヘッダー欠落でも落ちない）"""
-    try:
-        ws = ws_checkins()
-        vals = ws.get_all_records()
-        df = pd.DataFrame(vals)
-    except Exception as e:
-        st.warning(f"⚠️ checkinsの読み込みに失敗しました: {e}")
+    ws = ws_checkins()
+    recs = safe_get_all_records(ws, CHECKINS_H)
+    df = pd.DataFrame(recs)
+    if df.empty:
         df = pd.DataFrame(columns=CHECKINS_H)
-
-    # 空でも最低限のカラムを保証
-    for col in CHECKINS_H:
-        if col not in df.columns:
-            df[col] = None
-
-    # 型調整
-    df["points"] = pd.to_numeric(df.get("points", 0), errors="coerce").fillna(0).astype(int)
-    df["child_checked"] = df.get("child_checked", False).astype(str).str.lower().isin(["true","1","yes"])
-    df["parent_approved"] = df.get("parent_approved", False).astype(str).str.lower().isin(["true","1","yes"])
-
-    return df
-
+    if "points" in df.columns:
+        df["points"] = pd.to_numeric(df["points"], errors="coerce").fillna(0).astype(int)
+    for b in ["child_checked", "parent_approved"]:
+        if b in df.columns:
+            df[b] = df[b].astype(str).str.lower().isin(["true","1","yes"])
+    return df[CHECKINS_H]
+    
 def today_check_state(kid_id: str, goal_id: str):
     df = df_checkins(kid_id)
     if df.empty:
@@ -195,17 +237,6 @@ def goals_for_kid(kid_id: str, viewer: str = "child"):
     g = g[g["_kid_ids"].apply(is_target)]
 
     return g.reset_index(drop=True)
-
-
-
-def today_check_state(kid_id, goal_id):
-    df = df_checkins()
-    if df.empty: return False, False
-    today_s = date.today().isoformat()
-    hit = df[(df["date"]==today_s)&(df["kid_id"]==kid_id)&(df["goal_id"]==goal_id)]
-    if hit.empty: return False, False
-    r = hit.iloc[0]
-    return bool(r["child_checked"]), bool(r["parent_approved"])
 
 def monthly_total(kid_id, target_month):
     """target_month: 'YYYY-MM'"""
@@ -329,7 +360,7 @@ else:
     if gdf.empty:
         st.info("まだ目標が登録されていません。")
     else:
-            st.subheader(f"{kid_name} のチェック状況（{target_date.isoformat()}）")
+        st.subheader(f"{kid_name} のチェック状況（{target_date.isoformat()}）")
 
     for _, g in gdf.iterrows():
         ch, ap = state_map.get(g["id"], (False, False))
