@@ -137,16 +137,16 @@ def df_checkins():
             df[b] = df[b].astype(str).str.lower().isin(["true","1","yes"])
     return df[CHECKINS_H]
     
-def today_check_state(kid_id: str, goal_id: str):
-    df = df_checkins(kid_id)
+def today_check_state(kid_id, goal_id):
+    df = df_checkins()
     if df.empty:
         return False, False
-    today = date.today()
-    rec = df[(df["date"] == today) & (df["goal_id"] == goal_id)]
-    if rec.empty:
+    today_s = date.today().isoformat()  # 'YYYY-MM-DD'
+    hit = df[(df["date"] == today_s) & (df["kid_id"] == kid_id) & (df["goal_id"] == goal_id)]
+    if hit.empty:
         return False, False
-    row = rec.iloc[0]
-    return bool(row.get("child_checked", False)), bool(row.get("parent_approved", False))
+    r = hit.iloc[0]
+    return bool(r.get("child_checked", False)), bool(r.get("parent_approved", False))
 
 def seed_if_empty():
     # 最初の一回だけの種データ
