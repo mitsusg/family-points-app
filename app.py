@@ -340,6 +340,14 @@ def monthly_total(kid_id, target_month):
     m = m[m["child_checked"] & m["parent_approved"]]
     return int(m["points"].sum())
 
+def total_points_alltime(kid_id):
+    """承認済みの全期間合計ポイント"""
+    df = df_checkins()
+    if df.empty:
+        return 0
+    df = df[(df["kid_id"] == kid_id) & df["child_checked"] & df["parent_approved"]]
+    return int(df["points"].sum())
+
 
 # ============ UI ============
 st.title("✅ Family Points")
