@@ -137,21 +137,21 @@ def ws_goals():   return get_ws("goals", GOALS_H)
 def ws_checkins():return get_ws("checkins", CHECKINS_H)
 
 # ========= Sheets ユーティリティ =========
-# ========= Sheets ユーティリティ =========
 @st.cache_data(ttl=20)
 def df_kids():
     ws = ws_kids()
     recs = safe_get_all_records(ws, KIDS_H)
     df = pd.DataFrame(recs)
     if df.empty:
-        return pd.DataFrame(columns=KIDS_H)
+        df = pd.DataFrame(columns=KIDS_H)
     for c in KIDS_H:
         if c not in df.columns:
             df[c] = None
+    # 重複ID警告（任意）
+    if not df.empty and "id" in df.columns and df["id"].duplicated().any():
+        dups = df[df["id"].duplicated()]["id"].unique().tolist()
+        st.warning(f"⚠️ kids.id が重複しています: {dups}")
     return df[KIDS_H]
-    if df["id"].duplicated().any():
-    dups = df[df["id"].duplicated()]["id"].unique().tolist()
-    st.warning(f"⚠️ kids.id が重複しています: {dups}")
 
 @st.cache_data(ttl=20)
 def df_goals():
@@ -169,10 +169,11 @@ def df_goals():
         df["active"] = df["active"].astype(str).str.lower().isin(["true","1","yes"])
     if "audience" not in df.columns:
         df["audience"] = "both"
+    # 重複ID警告（任意）
+    if not df.empty and "id" in df.columns and df["id"].duplicated().any():
+        dups = df[df["id"].duplicated()]["id"].unique().tolist()
+        st.warning(f"⚠️ goals.id が重複しています: {dups}")
     return df[GOALS_H + ["audience"]]
-    if df["id"].duplicated().any():
-    dups = df[df["id"].duplicated()]["id"].unique().tolist()
-    st.warning(f"⚠️ goals.id が重複しています: {dups}")
 
 @st.cache_data(ttl=20)
 def df_checkins():
@@ -234,6 +235,7 @@ def seed_if_empty():
 
 
 # ========= Check-in の upsert =========
+# ========= Check-in の upsert =========
 def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
                    set_child=None, set_parent=None, points=0):
     ws = ws_checkins()
@@ -243,7 +245,7 @@ def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
     # 既存検索
     hit_idx = None
     if not df.empty:
-        mask = (df["date"]==key[0]) & (df["kid_id"]==key[1]) & (df["goal_id"]==key[2])
+        mask = (df["date"] == key[0]) & (df["kid_id"] == key[1]) & (df["goal_id"] == key[2])
         if mask.any():
             hit_idx = df[mask].index[0]
 
@@ -264,28 +266,27 @@ def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
         }
         ws.append_row([row[h] for h in CHECKINS_H])
     else:
-        # 更新
-    r = hit_idx + 2  # 1行目ヘッダのため +2
-    ops = []
-    if set_child is not None:
+        # 更新（batch_update でまとめて）
+        r = hit_idx + 2  # 1行目ヘッダのため +2
+        ops = []
+        if set_child is not None:
+            ops.append({
+                "range": f"{ws.title}!{chr(65 + CHECKINS_H.index('child_checked'))}{r}",
+                "values": [[str(bool(set_child))]],
+            })
+        if set_parent is not None:
+            ops.append({
+                "range": f"{ws.title}!{chr(65 + CHECKINS_H.index('parent_approved'))}{r}",
+                "values": [[str(bool(set_parent))]],
+            })
         ops.append({
-            "range": f"{ws.title}!{chr(65 + CHECKINS_H.index('child_checked'))}{r}",
-            "values": [[str(bool(set_child))]],
+            "range": f"{ws.title}!{chr(65 + CHECKINS_H.index('updated_at'))}{r}",
+            "values": [[now]],
         })
-    if set_parent is not None:
-        ops.append({
-            "range": f"{ws.title}!{chr(65 + CHECKINS_H.index('parent_approved'))}{r}",
-            "values": [[str(bool(set_parent))]],
-        })
-    ops.append({
-        "range": f"{ws.title}!{chr(65 + CHECKINS_H.index('updated_at'))}{r}",
-        "values": [[now]],
-    })
-    if ops:
-        ws.batch_update(ops)
+        if ops:
+            ws.batch_update(ops)
 
-
-    # ← 既存の append_row / update_cell の後で
+    # 書き込み後はキャッシュをクリアして即時反映
     st.cache_data.clear()
 
 def goals_for_kid(kid_id: str, viewer: str = "child"):
@@ -347,7 +348,7 @@ if role == "子ども":
     kid_id = kid_map[kid_label]
     kid_name = kid_label.split("（")[0]
 
-    gdf = goals_for_kid(kid_id, viewer="parent")
+    gdf = goals_for_kid(kid_id, viewer="child")
     if gdf.empty:
         st.info("まだ目標が登録されていません。")
     else:
@@ -368,7 +369,6 @@ if role == "子ども":
     st.metric("今月の合計ポイント（承認済）", f"{total} 点")
 
 # --- 親画面 ---
-c2.write("自己チェック" if ch else "未チェック")
 else:
     # 親ロック（簡易）
     ok = True
@@ -393,7 +393,7 @@ else:
         kid_name = kid_label.split("（")[0]
         target_date = st.date_input("対象日", date.today())
 
-    gdf = goals_for_kid(kid_id)
+    gdf = goals_for_kid(kid_id, viewer="parent")
         # 追加: 未承認だけ表示のフィルタ
     show_only_pending = st.checkbox("未承認だけ表示", value=False)
 
@@ -405,20 +405,25 @@ else:
     # （後続のループで使い回すために辞書化）
     state_map = {}  # (goal_id) -> (child_checked, parent_approved)
     for _, g in gdf.iterrows():
-        ch, ap = (False, False)
-        if target_date == date.today():
-            ch, ap = today_check_state(kid_id, g["id"])
-        else:
-            if not df.empty:
-                mask = (
-                    (df["date"] == target_iso) &
-                    (df["kid_id"] == kid_id) &
-                    (df["goal_id"] == g["id"])
-                )
-                if mask.any():
-                    r = df[mask].iloc[0]
-                    ch, ap = bool(r["child_checked"]), bool(r["parent_approved"])
-        state_map[g["id"]] = (ch, ap)
+        btn_text = "承認取消" if ap else "承認する"
+        btn_key = f"approve_{g['id']}"
+         if c3.button(btn_text, key=btn_key):
+             # 取り消し時は確認ダイアログ（2段階）
+             confirm_key = f"confirm_unapprove_{g['id']}"
+             if ap and not st.session_state.get(confirm_key):
+                 st.session_state[confirm_key] = True
+                 st.warning("本当に承認を取り消しますか？もう一度ボタンを押すと実行されます。")
+             else:
+                 # 実行
+                 st.session_state.pop(confirm_key, None)
+                 upsert_checkin(
+                     target_iso, kid_id, kid_name,
+                     g["id"], g["title"],
+                     set_parent=not ap,   # トグル
+                     points=int(g["points"])
+                 )
+                 st.experimental_rerun()
+
 
     # 未承認だけ表示が ON なら gdf を絞り込む
     if show_only_pending:
