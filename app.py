@@ -248,6 +248,7 @@ def seed_if_empty():
 # ============ Check-in の upsert ============
 def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
                    set_child=None, set_parent=None, points=0):
+    """checkins への upsert（更新はバッチでまとめて / gspread 互換ハンドリング）"""
     ws = ws_checkins()
     df = df_checkins()
     key = (str(the_date), str(kid_id), str(goal_id))
@@ -277,7 +278,7 @@ def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
         ws.append_row([row[h] for h in CHECKINS_H])
     else:
         # 更新（values_batch_update でまとめて）
-        r = hit_idx + 2  # 1行目がヘッダなので +2 でシート行番号
+        r = hit_idx + 2  # 1行目がヘッダなので +2
         ops = []
 
         # child_checked
@@ -292,15 +293,18 @@ def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
             a1 = f"{ws.title}!{rowcol_to_a1(r, col_idx)}"
             ops.append({"range": a1, "values": [[str(bool(set_parent))]]})
 
-        # updated_at
+        # updated_at（常に更新）
         col_idx = CHECKINS_H.index("updated_at") + 1
         a1 = f"{ws.title}!{rowcol_to_a1(r, col_idx)}"
         ops.append({"range": a1, "values": [[now]]})
 
         if ops:
-            ws.spreadsheet.values_batch_update(
-                {"valueInputOption": "USER_ENTERED", "data": ops}
-            )
+            body = {"valueInputOption": "USER_ENTERED", "data": ops}
+            # gspread の版差対策：positional / keyword の両対応
+            try:
+                ws.spreadsheet.values_batch_update(body)
+            except TypeError:
+                ws.spreadsheet.values_batch_update(body=body)
 
     # 書き込み後はキャッシュをクリアして即時反映
     st.cache_data.clear()
