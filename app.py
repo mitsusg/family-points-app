@@ -389,6 +389,11 @@ if role == "子ども":
     total = monthly_total(kid_id, ym)
     st.metric("今月の合計ポイント（承認済）", f"{total} 点")
 
+    # 累計ポイントも表示
+    total_all = total_points_alltime(kid_id)
+    st.metric("累計ポイント（承認済）", f"{total_all} 点")
+
+
 # --- 親画面 ---
 else:
     # 親ロック（簡易）
