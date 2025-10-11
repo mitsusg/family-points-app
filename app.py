@@ -9,6 +9,8 @@ from google.oauth2.service_account import Credentials
 from datetime import date, datetime
 import pandas as pd
 
+from gspread.utils import rowcol_to_a1
+
 # ============ ページ設定 ============
 st.set_page_config(page_title="Family Points", page_icon="✅", layout="wide")
 
@@ -274,32 +276,34 @@ def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
         }
         ws.append_row([row[h] for h in CHECKINS_H])
     else:
-        # 更新（batch_update でまとめて）
-        r = hit_idx + 2  # 1行目ヘッダのため +2
+        # 更新（values_batch_update でまとめて）
+        r = hit_idx + 2  # 1行目がヘッダなので +2 でシート行番号
         ops = []
+
+        # child_checked
         if set_child is not None:
-            ops.append({
-                "range": f"{ws.title}!{chr(65 + CHECKINS_H.index('child_checked'))}{r}",
-                "values": [[str(bool(set_child))]],
-            })
+            col_idx = CHECKINS_H.index("child_checked") + 1  # A=1
+            a1 = f"{ws.title}!{rowcol_to_a1(r, col_idx)}"
+            ops.append({"range": a1, "values": [[str(bool(set_child))]]})
+
+        # parent_approved
         if set_parent is not None:
-            ops.append({
-                "range": f"{ws.title}!{chr(65 + CHECKINS_H.index('parent_approved'))}{r}",
-                "values": [[str(bool(set_parent))]],
-            })
-        ops.append({
-            "range": f"{ws.title}!{chr(65 + CHECKINS_H.index('updated_at'))}{r}",
-            "values": [[now]],
-        })
-      if ops:
-          ws.spreadsheet.values_batch_update({
-            "valueInputOption": "USER_ENTERED",
-             "data": ops
-         })
+            col_idx = CHECKINS_H.index("parent_approved") + 1
+            a1 = f"{ws.title}!{rowcol_to_a1(r, col_idx)}"
+            ops.append({"range": a1, "values": [[str(bool(set_parent))]]})
+
+        # updated_at
+        col_idx = CHECKINS_H.index("updated_at") + 1
+        a1 = f"{ws.title}!{rowcol_to_a1(r, col_idx)}"
+        ops.append({"range": a1, "values": [[now]]})
+
+        if ops:
+            ws.spreadsheet.values_batch_update(
+                {"valueInputOption": "USER_ENTERED", "data": ops}
+            )
 
     # 書き込み後はキャッシュをクリアして即時反映
     st.cache_data.clear()
-
 
 def goals_for_kid(kid_id: str, viewer: str = "child"):
     g = df_goals().copy()
