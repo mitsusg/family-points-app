@@ -291,8 +291,11 @@ def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
             "range": f"{ws.title}!{chr(65 + CHECKINS_H.index('updated_at'))}{r}",
             "values": [[now]],
         })
-        if ops:
-            ws.batch_update(ops)
+      if ops:
+          ws.spreadsheet.values_batch_update({
+            "valueInputOption": "USER_ENTERED",
+             "data": ops
+         })
 
     # 書き込み後はキャッシュをクリアして即時反映
     st.cache_data.clear()
