@@ -354,19 +354,33 @@ if role == "子ども":
     else:
         st.subheader("今日の目標（自己チェック）")
         for _, g in gdf.iterrows():
-            ch, ap = today_check_state(kid_id, g["id"])
-            new_ch = st.checkbox(f'{g["title"]}（{g["points"]}点）', value=ch, key=f"kid_{g['id']}")
-            if new_ch != ch:
-                upsert_checkin(
-                    date.today().isoformat(), kid_id, kid_name,
-                    g["id"], g["title"], set_child=new_ch, points=int(g["points"])
-                )
-        st.success("チェックは自動保存されます。")
+            ch, ap = state_map.get(g["id"], (False, False))
+            c1, c2, c3 = st.columns([2.5, 1.2, 1])
+            c1.write(f'• {g["title"]}（{int(g["points"])}点）')
+            c2.write("自己チェック" if ch else "未チェック")
+            btn_text = "承認取消" if ap else "承認する"
+            btn_key = f"approve_{g['id']}"
 
-    # 今月の合計（親承認済みのみ）
-    ym = date.today().strftime("%Y-%m")
-    total = monthly_total(kid_id, ym)
-    st.metric("今月の合計ポイント（承認済）", f"{total} 点")
+            # 承認ボタン処理（2段階確認付き）
+            if c3.button(btn_text, key=btn_key):
+                confirm_key = f"confirm_unapprove_{g['id']}"
+                if ap and not st.session_state.get(confirm_key):
+                    st.session_state[confirm_key] = True
+                    st.warning("本当に承認を取り消しますか？もう一度ボタンを押すと実行されます。")
+                else:
+                    st.session_state.pop(confirm_key, None)
+                    upsert_checkin(
+                        target_iso, kid_id, kid_name,
+                        g["id"], g["title"],
+                        set_parent=not ap,
+                        points=int(g["points"])
+                    )
+                    st.experimental_rerun()
+
+            # 今月の合計（親承認済みのみ）
+            ym = date.today().strftime("%Y-%m")
+            total = monthly_total(kid_id, ym)
+            st.metric("今月の合計ポイント（承認済）", f"{total} 点")
 
 # --- 親画面 ---
 else:
