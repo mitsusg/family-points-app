@@ -342,7 +342,7 @@ def monthly_total(kid_id, target_month):
 
 
 # ============ UI ============
-st.title("✅ Family Points (Google Sheets 版)")
+st.title("✅ Family Points")
 
 role = st.radio("ロールを選択", ["子ども", "親"], horizontal=True)
 
