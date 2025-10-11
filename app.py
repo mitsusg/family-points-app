@@ -10,12 +10,18 @@ import pandas as pd
 
 st.set_page_config(page_title="Family Points", page_icon="✅", layout="wide")
 
-# ========= Google Sheets =========
-@st.cache_resource
-# ========= Google Sheets =========
-
 # 小さなリトライ
-def retry(times=3, wait=0.6, exceptions=(gspread.exceptions.APIError,)):
+import requests
+from google.auth.exceptions import TransportError
+
+RETRIABLE = (
+    gspread.exceptions.APIError,
+    requests.exceptions.RequestException,
+    TransportError,
+    TimeoutError,
+)
+
+def retry(times=5, base_wait=0.6, factor=1.8):
     def deco(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
@@ -23,12 +29,16 @@ def retry(times=3, wait=0.6, exceptions=(gspread.exceptions.APIError,)):
             for i in range(times):
                 try:
                     return fn(*args, **kwargs)
-                except exceptions as e:
+                except RETRIABLE as e:
                     last = e
-                    time.sleep(wait * (1.5 ** i))
+                    status = getattr(getattr(e, "response", None), "status_code", None)
+                    if status and status not in (429, 500, 502, 503, 504):
+                        raise
+                    time.sleep(base_wait * (factor ** i))
             raise last
         return wrapper
     return deco
+
 
 @st.cache_resource
 def get_client():
@@ -55,7 +65,7 @@ def _get_ws_cached(sheet_id: str, name: str, headers_tuple: tuple):
         time.sleep(0.2)  # 作成直後の整合待ち
     return ws
 
-@retry(times=3, wait=0.6)
+@retry(times=3, base_wait=0.6)
 def get_ws(name: str, headers: list[str]):
     sheet_id = _sheet_id_from_url()
     ws = _get_ws_cached(sheet_id, name, tuple(headers))
@@ -67,40 +77,44 @@ def get_ws(name: str, headers: list[str]):
     return ws
 
 # 全レコードを安全に取得（ヘッダ崩れでも落ちない）
-@retry(times=3, wait=0.6)
+@retry(times=5, base_wait=0.6, factor=1.8)
 def safe_get_all_records(ws, expected_headers: list[str]) -> list[dict]:
+    """
+    1行目=ヘッダー前提で安全に全件を返す。
+    空/崩れ/直後の整合不良でも落ちずに自己修復。
+    """
     vals = ws.get_all_values()
     if not vals:
         ws.update("1:1", [expected_headers])
+        time.sleep(0.2)
         return []
 
-    # 1行目＝ヘッダー
     headers = [str(h).strip() for h in (vals[0] or [])]
     rows = vals[1:]
 
-    # ヘッダーが期待と異なる場合は修復
     if headers != expected_headers:
         ws.update("1:1", [expected_headers])
-        headers = expected_headers
+        time.sleep(0.3)
+        vals = ws.get_all_values()
+        headers = vals[0] if vals else expected_headers
+        rows = vals[1:] if len(vals) > 1 else []
 
     if not rows:
         return []
 
-    # ---- ここがポイント：行長をヘッダー数に合わせる ----
     n = len(headers)
     norm_rows = []
     for r in rows:
         r = list(r or [])
         if len(r) < n:
-            r = r + [None] * (n - len(r))   # 足りない分を None でパディング
+            r = r + [None] * (n - len(r))
         elif len(r) > n:
-            r = r[:n]                       # 余計な列は切り捨て
+            r = r[:n]
         norm_rows.append(r)
 
     df = pd.DataFrame(norm_rows, columns=headers)
     df = df.applymap(lambda x: None if (x is None or str(x).strip() == "") else x)
     return df.to_dict(orient="records")
-
 
 # タブとヘッダ
 KIDS_H = ["id", "name", "grade", "active"]
@@ -116,42 +130,50 @@ def ws_checkins():return get_ws("checkins", CHECKINS_H)
 
 # ========= Sheets ユーティリティ =========
 # ========= Sheets ユーティリティ =========
+@st.cache_data(ttl=20)
 def df_kids():
     ws = ws_kids()
     recs = safe_get_all_records(ws, KIDS_H)
     df = pd.DataFrame(recs)
     if df.empty:
         return pd.DataFrame(columns=KIDS_H)
+    for c in KIDS_H:
+        if c not in df.columns:
+            df[c] = None
     return df[KIDS_H]
 
+@st.cache_data(ttl=20)
 def df_goals():
     ws = ws_goals()
     recs = safe_get_all_records(ws, GOALS_H)
     df = pd.DataFrame(recs)
     if df.empty:
         df = pd.DataFrame(columns=GOALS_H)
+    for c in GOALS_H:
+        if c not in df.columns:
+            df[c] = None
     if "points" in df.columns:
         df["points"] = pd.to_numeric(df["points"], errors="coerce").fillna(0).astype(int)
     if "active" in df.columns:
         df["active"] = df["active"].astype(str).str.lower().isin(["true","1","yes"])
-    # audience列を確実に含める（無ければ"both"を追加）
     if "audience" not in df.columns:
         df["audience"] = "both"
     return df[GOALS_H + ["audience"]]
 
-
-
+@st.cache_data(ttl=20)
 def df_checkins():
     ws = ws_checkins()
     recs = safe_get_all_records(ws, CHECKINS_H)
     df = pd.DataFrame(recs)
     if df.empty:
         df = pd.DataFrame(columns=CHECKINS_H)
+    for c in CHECKINS_H:
+        if c not in df.columns:
+            df[c] = None
     if "points" in df.columns:
         df["points"] = pd.to_numeric(df["points"], errors="coerce").fillna(0).astype(int)
     for b in ["child_checked", "parent_approved"]:
-        if b in df.columns:
-            df[b] = df[b].astype(str).str.lower().isin(["true","1","yes"])
+        df[b] = df[b].astype(str).str.lower().isin(["true","1","yes"])
     return df[CHECKINS_H]
     
 def today_check_state(kid_id, goal_id):
@@ -165,20 +187,37 @@ def today_check_state(kid_id, goal_id):
     r = hit.iloc[0]
     return bool(r.get("child_checked", False)), bool(r.get("parent_approved", False))
 
+def ensure_ws_and_header(name, headers):
+    ws = get_ws(name, headers)
+    first = ws.row_values(1)
+    if first != headers:
+        ws.update("1:1", [headers])
+        time.sleep(0.2)
+    return ws
+
 def seed_if_empty():
-    # 最初の一回だけの種データ
+    if st.session_state.get("_seeded_once"):
+        return
+
+    ensure_ws_and_header("kids", KIDS_H)
+    ensure_ws_and_header("goals", GOALS_H)
+    ensure_ws_and_header("checkins", CHECKINS_H)
+    time.sleep(0.2)
+
     kids = df_kids()
-    goals = df_goals()
     if kids.empty:
         ws_kids().append_row(["k1", "そうた", "年中", "TRUE"])
         ws_kids().append_row(["k2", "みお",   "小1", "TRUE"])
+
+    goals = df_goals()
     if goals.empty:
-        # 共通目標（kid_id 空）
         ws_goals().append_row(["g1", "ランニング10分", 3, "TRUE", ""])
         ws_goals().append_row(["g2", "宿題をする",     5, "TRUE", ""])
         ws_goals().append_row(["g3", "歯みがき",       2, "TRUE", ""])
 
-seed_if_empty()
+    st.session_state["_seeded_once"] = True
+    st.cache_data.clear()
+
 
 # ========= Check-in の upsert =========
 def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
@@ -218,6 +257,9 @@ def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
         if set_parent is not None:
             ws.update_cell(r, CHECKINS_H.index("parent_approved")+1, str(bool(set_parent)))
         ws.update_cell(r, CHECKINS_H.index("updated_at")+1, now)
+
+    # ← 既存の append_row / update_cell の後で
+    st.cache_data.clear()
 
 def goals_for_kid(kid_id: str, viewer: str = "child"):
     g = df_goals().copy()
@@ -367,6 +409,7 @@ else:
                     points=int(g["points"])
                 )
         st.success("一括承認しました。")
+        st.cache_data.clear()  
         st.experimental_rerun()
 
     if gdf.empty:
