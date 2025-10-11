@@ -414,6 +414,7 @@ else:
             if not st.session_state["parent_ok"]:
                 st.stop()
 
+    # 子と対象日を選択
     colL, colR = st.columns([1, 1.4])
     with colL:
         kid_label = st.selectbox("お子さんを選択", list(kid_map.keys()))
@@ -423,110 +424,167 @@ else:
 
     # audience のインタラクティブ切替（任意）
     with st.expander("🎛 表示オプション"):
-        forced_audience = st.selectbox("audienceフィルタ", ["自動（parent）", "child", "parent", "both"], index=0)
+        audience_mode = st.selectbox("audienceフィルタ", ["自動（parent）", "child", "parent", "both"], index=0)
 
+    # 対象子のゴール一覧（audience 適用）
     gdf = goals_for_kid(kid_id, viewer="parent")
-    if forced_audience != "自動（parent）":
-        gdf = goals_for_kid(kid_id, viewer=forced_audience)
+    if audience_mode != "自動（parent）":
+        gdf = goals_for_kid(kid_id, viewer=audience_mode)
 
-   # --- 親画面 ---
+    # 表示モードを選択
+    mode = st.radio(
+        "表示モード",
+        ["対象日の全件", "対象日の未承認", "未承認だけ（全日）"],
+        horizontal=True,
+    )
 
-    # 追加: 未承認だけ表示のフィルタ
-    show_only_pending = st.checkbox("未承認だけ表示（全日対象）", value=False)
-
+    # checkins 全体を取得
     df_all = df_checkins()
     target_iso = target_date.isoformat()
 
-    state_map = {}
-    for _, g in gdf.iterrows():
-        ch, ap = (False, False)
-        if target_date == date.today():
-            ch, ap = today_check_state(kid_id, g["id"])
-        else:
-            if not df_all.empty:
-                mask = (
-                    (df_all["date"] == target_iso)
-                    & (df_all["kid_id"] == kid_id)
-                    & (df_all["goal_id"] == g["id"])
-                )
-                if mask.any():
-                    r = df_all[mask].iloc[0]
-                    ch, ap = bool(r["child_checked"]), bool(r["parent_approved"])
-        state_map[g["id"]] = (ch, ap)
-
-    # ✅ 全日対象の未承認リスト生成
-    if show_only_pending and not df_all.empty:
-        df_pending = df_all[
-            (df_all["kid_id"] == kid_id)
-            & (df_all["child_checked"])
-            & (~df_all["parent_approved"])
-        ].copy()
-        if df_pending.empty:
-            st.info("未承認のチェックインはありません。")
-            st.stop()
-
-        st.subheader(f"🕒 未承認のチェックイン一覧（全日）")
-        for _, r in df_pending.iterrows():
-            c1, c2, c3 = st.columns([2.5, 1.5, 1])
-            c1.write(f'{r["goal_title"]}（{r["points"]}点）')
-            c2.write(f'日付：{r["date"]}')
-            if c3.button("承認する", key=f"approve_pending_{r['date']}_{r['goal_id']}"):
-                upsert_checkin(
-                    r["date"], kid_id, kid_name,
-                    r["goal_id"], r["goal_title"],
-                    set_parent=True, points=int(r["points"])
-                )
-                st.success(f'{r["goal_title"]}（{r["date"]}）を承認しました。')
-                st.cache_data.clear()
-                st.experimental_rerun()
-        st.stop()
-
-    # 一括承認
-    if st.button("表示中の目標を一括承認する"):
+    # =============== 1) 対象日の全件（従来表示） ===============
+    if mode == "対象日の全件":
+        # 当日・過去日いずれでも現在の状態を算出
+        state_map = {}  # goal_id -> (child_checked, parent_approved)
         for _, g in gdf.iterrows():
-            ch, ap = state_map.get(g["id"], (False, False))
-            if ch and not ap:
-                upsert_checkin(
-                    target_iso, kid_id, kid_name,
-                    g["id"], g["title"],
-                    set_parent=True,
-                    points=int(g["points"])
-                )
-        st.success("一括承認しました。")
-        st.cache_data.clear()
-        st.experimental_rerun()
+            ch, ap = (False, False)
+            if target_date == date.today():
+                ch, ap = today_check_state(kid_id, g["id"])
+            else:
+                if not df_all.empty:
+                    mask = (
+                        (df_all["date"] == target_iso) &
+                        (df_all["kid_id"] == kid_id) &
+                        (df_all["goal_id"] == g["id"])
+                    )
+                    if mask.any():
+                        r = df_all[mask].iloc[0]
+                        ch, ap = bool(r["child_checked"]), bool(r["parent_approved"])
+            state_map[g["id"]] = (ch, ap)
 
-    if gdf.empty:
-        st.info("まだ目標が登録されていません。")
-    else:
-        st.subheader(f"{kid_name} のチェック状況（{target_date.isoformat()}）")
+        st.subheader(f"{kid_name} のチェック状況（{target_iso}）")
+        # 一括承認（対象日のみ）
+        if st.button("表示中の目標を一括承認する"):
+            for _, g in gdf.iterrows():
+                ch, ap = state_map.get(g["id"], (False, False))
+                if ch and not ap:
+                    upsert_checkin(
+                        target_iso, kid_id, kid_name,
+                        g["id"], g["title"],
+                        set_parent=True,
+                        points=int(g["points"])
+                    )
+            st.success("一括承認しました。")
+            st.cache_data.clear()
+            st.experimental_rerun()
+
+        # 行ごとの承認トグル
         for _, g in gdf.iterrows():
             ch, ap = state_map.get(g["id"], (False, False))
             c1, c2, c3 = st.columns([2.5, 1.2, 1])
             c1.write(f'• {g["title"]}（{int(g["points"])}点）')
             c2.write("自己チェック" if ch else "未チェック")
             btn_text = "承認取消" if ap else "承認する"
-            btn_key = f"approve_{g['id']}"
-
+            btn_key = f"approve_{target_iso}_{g['id']}"
             if c3.button(btn_text, key=btn_key):
-                confirm_key = f"confirm_unapprove_{g['id']}"
-                if ap and not st.session_state.get(confirm_key):
-                    st.session_state[confirm_key] = True
-                    st.warning("本当に承認を取り消しますか？もう一度ボタンを押すと実行されます。")
-                else:
-                    st.session_state.pop(confirm_key, None)
-                    upsert_checkin(
-                        target_iso, kid_id, kid_name,
-                        g["id"], g["title"],
-                        set_parent=not ap,  # トグル
-                        points=int(g["points"])
-                    )
-                    st.experimental_rerun()
+                upsert_checkin(
+                    target_iso, kid_id, kid_name,
+                    g["id"], g["title"],
+                    set_parent=not ap,  # トグル
+                    points=int(g["points"])
+                )
+                st.experimental_rerun()
 
-    # 合計表示
+    # =============== 2) 対象日の未承認だけ ===============
+    elif mode == "対象日の未承認":
+        if df_all.empty:
+            st.info("対象日に未承認はありません。")
+            st.stop()
+        df_pending = df_all[
+            (df_all["date"] == target_iso) &
+            (df_all["kid_id"] == kid_id) &
+            (df_all["child_checked"]) &
+            (~df_all["parent_approved"])
+        ].copy()
+
+        if df_pending.empty:
+            st.info("対象日に未承認はありません。")
+            st.stop()
+
+        st.subheader(f"🕒 未承認のチェックイン（{target_iso}）")
+        # 一括承認（対象日の未承認）
+        if st.button("この日の未承認をすべて承認する"):
+            for _, r in df_pending.iterrows():
+                upsert_checkin(
+                    r["date"], kid_id, kid_name,
+                    r["goal_id"], r["goal_title"],
+                    set_parent=True, points=int(r["points"])
+                )
+            st.success("承認しました。")
+            st.experimental_rerun()
+
+        for _, r in df_pending.iterrows():
+            c1, c2, c3 = st.columns([2.5, 1.5, 1])
+            c1.write(f'{r["goal_title"]}（{int(r["points"])}点）')
+            c2.write(f'日付：{r["date"]}')
+            btn_key = f"approve_pending_day_{r['date']}_{r['goal_id']}"
+            if c3.button("承認する", key=btn_key):
+                upsert_checkin(
+                    r["date"], kid_id, kid_name,
+                    r["goal_id"], r["goal_title"],
+                    set_parent=True, points=int(r["points"])
+                )
+                st.success(f'{r["goal_title"]}（{r["date"]}）を承認しました。')
+                st.experimental_rerun()
+        st.stop()
+
+    # =============== 3) 未承認だけ（全日） ===============
+    else:
+        if df_all.empty:
+            st.info("未承認のチェックインはありません。")
+            st.stop()
+
+        df_pending = df_all[
+            (df_all["kid_id"] == kid_id) &
+            (df_all["child_checked"]) &
+            (~df_all["parent_approved"])
+        ].copy().sort_values("date")
+
+        if df_pending.empty:
+            st.info("未承認のチェックインはありません。")
+            st.stop()
+
+        st.subheader("🕒 未承認のチェックイン一覧（全日）")
+        # 一括承認（全日）
+        if st.button("未承認（全日）をすべて承認する"):
+            for _, r in df_pending.iterrows():
+                upsert_checkin(
+                    r["date"], kid_id, kid_name,
+                    r["goal_id"], r["goal_title"],
+                    set_parent=True, points=int(r["points"])
+                )
+            st.success("承認しました。")
+            st.experimental_rerun()
+
+        for _, r in df_pending.iterrows():
+            c1, c2, c3 = st.columns([2.5, 1.5, 1])
+            c1.write(f'{r["goal_title"]}（{int(r["points"])}点）')
+            c2.write(f'日付：{r["date"]}')
+            btn_key = f"approve_pending_all_{r['date']}_{r['goal_id']}"
+            if c3.button("承認する", key=btn_key):
+                upsert_checkin(
+                    r["date"], kid_id, kid_name,
+                    r["goal_id"], r["goal_title"],
+                    set_parent=True, points=int(r["points"])
+                )
+                st.success(f'{r["goal_title"]}（{r["date"]}）を承認しました。')
+                st.experimental_rerun()
+
+    # 合計表示（対象月）
     ym = target_date.strftime("%Y-%m")
     total = monthly_total(kid_id, ym)
     st.metric(f"{kid_name} の {ym} 合計ポイント（承認済）", f"{total} 点")
+
 
 
 # ============ 便利ツール ============
