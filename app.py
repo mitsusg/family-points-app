@@ -1,6 +1,7 @@
 # app.py — Family Points (Google Sheets)
 import time
 import functools
+import io
 
 import streamlit as st
 import gspread
@@ -8,8 +9,10 @@ from google.oauth2.service_account import Credentials
 from datetime import date, datetime
 import pandas as pd
 
+# ============ ページ設定 ============
 st.set_page_config(page_title="Family Points", page_icon="✅", layout="wide")
 
+# ============ タイムゾーン ============
 import pytz
 TZ_NAME = st.secrets.get("tz", "Asia/Tokyo")
 TZ = pytz.timezone(TZ_NAME)
@@ -18,7 +21,7 @@ def now_iso():
     return datetime.now(TZ).isoformat(timespec="seconds")
 
 
-# 小さなリトライ
+# ============ 小さなリトライ ============
 import requests
 from google.auth.exceptions import TransportError
 
@@ -40,6 +43,7 @@ def retry(times=5, base_wait=0.6, factor=1.8):
                 except RETRIABLE as e:
                     last = e
                     status = getattr(getattr(e, "response", None), "status_code", None)
+                    # 4xx でも429はリトライ、それ以外の4xxは即時raise
                     if status and status not in (429, 500, 502, 503, 504):
                         raise
                     time.sleep(base_wait * (factor ** i))
@@ -48,6 +52,7 @@ def retry(times=5, base_wait=0.6, factor=1.8):
     return deco
 
 
+# ============ Google Sheets ============
 @st.cache_resource
 def get_client():
     info = st.secrets["gcp_service_account"]
@@ -124,19 +129,21 @@ def safe_get_all_records(ws, expected_headers: list[str]) -> list[dict]:
     df = df.applymap(lambda x: None if (x is None or str(x).strip() == "") else x)
     return df.to_dict(orient="records")
 
-# タブとヘッダ
+
+# ============ タブとヘッダ ============
 KIDS_H = ["id", "name", "grade", "active"]
-GOALS_H = ["id", "title", "points", "active", "kid_id"]  # kid_id 空=共通目標
+GOALS_H = ["id", "title", "points", "active", "kid_id"]  # kid_id 空=共通目標 or "k1,k2"
 CHECKINS_H = [
     "date", "kid_id", "kid_name", "goal_id", "goal_title",
     "points", "child_checked", "parent_approved", "updated_at"
 ]
 
-def ws_kids():    return get_ws("kids", KIDS_H)
-def ws_goals():   return get_ws("goals", GOALS_H)
-def ws_checkins():return get_ws("checkins", CHECKINS_H)
+def ws_kids():     return get_ws("kids", KIDS_H)
+def ws_goals():    return get_ws("goals", GOALS_H)
+def ws_checkins(): return get_ws("checkins", CHECKINS_H)
 
-# ========= Sheets ユーティリティ =========
+
+# ============ Sheets ユーティリティ ============
 @st.cache_data(ttl=20)
 def df_kids():
     ws = ws_kids()
@@ -167,6 +174,7 @@ def df_goals():
         df["points"] = pd.to_numeric(df["points"], errors="coerce").fillna(0).astype(int)
     if "active" in df.columns:
         df["active"] = df["active"].astype(str).str.lower().isin(["true","1","yes"])
+    # audience列が無ければ "both" を補う
     if "audience" not in df.columns:
         df["audience"] = "both"
     # 重複ID警告（任意）
@@ -190,7 +198,7 @@ def df_checkins():
     for b in ["child_checked", "parent_approved"]:
         df[b] = df[b].astype(str).str.lower().isin(["true","1","yes"])
     return df[CHECKINS_H]
-    
+
 def today_check_state(kid_id, goal_id):
     df = df_checkins()
     if df.empty:
@@ -211,6 +219,7 @@ def ensure_ws_and_header(name, headers):
     return ws
 
 def seed_if_empty():
+    # セッション中は1回だけ
     if st.session_state.get("_seeded_once"):
         return
 
@@ -234,8 +243,7 @@ def seed_if_empty():
     st.cache_data.clear()
 
 
-# ========= Check-in の upsert =========
-# ========= Check-in の upsert =========
+# ============ Check-in の upsert ============
 def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
                    set_child=None, set_parent=None, points=0):
     ws = ws_checkins()
@@ -289,6 +297,7 @@ def upsert_checkin(the_date, kid_id, kid_name, goal_id, goal_title,
     # 書き込み後はキャッシュをクリアして即時反映
     st.cache_data.clear()
 
+
 def goals_for_kid(kid_id: str, viewer: str = "child"):
     g = df_goals().copy()
 
@@ -320,29 +329,33 @@ def goals_for_kid(kid_id: str, viewer: str = "child"):
     g = g[g["_kid_ids"].apply(is_target)]
     return g.reset_index(drop=True)
 
+
 def monthly_total(kid_id, target_month):
     """target_month: 'YYYY-MM'"""
     df = df_checkins()
-    if df.empty: return 0
-    m = df[(df["kid_id"]==kid_id)]
+    if df.empty:
+        return 0
+    m = df[(df["kid_id"] == kid_id)]
     m = m[m["date"].str.startswith(target_month)]
     m = m[m["child_checked"] & m["parent_approved"]]
     return int(m["points"].sum())
 
-# ========= UI =========
+
+# ============ UI ============
 st.title("✅ Family Points (Google Sheets 版)")
 
 role = st.radio("ロールを選択", ["子ども", "親"], horizontal=True)
 
 kids = df_kids()
-kids = kids[kids.get("active","TRUE").astype(str).str.lower()=="true"].reset_index(drop=True)
-kid_map = {f'{row["name"]}（{row.get("grade","")}）': row["id"] for _,row in kids.iterrows()}
+kids = kids[kids.get("active", "TRUE").astype(str).str.lower() == "true"].reset_index(drop=True)
+kid_map = {f'{row["name"]}（{row.get("grade","")}）': row["id"] for _, row in kids.iterrows()}
 if not kid_map:
     st.warning("Kids データが空です。シート 'kids' に行を追加してください。")
     st.stop()
 
+seed_if_empty()
+
 # --- 子ども画面 ---
-st.subheader("今日の目標（自己チェック）")
 if role == "子ども":
     kid_label = st.selectbox("自分を選んでね", list(kid_map.keys()))
     kid_id = kid_map[kid_label]
@@ -354,6 +367,101 @@ if role == "子ども":
     else:
         st.subheader("今日の目標（自己チェック）")
         for _, g in gdf.iterrows():
+            ch, ap = today_check_state(kid_id, g["id"])
+            new_ch = st.checkbox(f'{g["title"]}（{g["points"]}点）', value=ch, key=f"kid_{g['id']}")
+            if new_ch != ch:
+                upsert_checkin(
+                    date.today().isoformat(), kid_id, kid_name,
+                    g["id"], g["title"], set_child=new_ch, points=int(g["points"])
+                )
+        st.success("チェックは自動保存されます。")
+
+    # 今月の合計（親承認済みのみ）
+    ym = date.today().strftime("%Y-%m")
+    total = monthly_total(kid_id, ym)
+    st.metric("今月の合計ポイント（承認済）", f"{total} 点")
+
+# --- 親画面 ---
+else:
+    # 親ロック（簡易）
+    try:
+        required = st.secrets.get("parent_pass", "")
+    except Exception:
+        required = ""
+    if required:
+        if "parent_ok" not in st.session_state:
+            st.session_state["parent_ok"] = False
+        if not st.session_state["parent_ok"]:
+            inp = st.text_input("親パスコードを入力してください", type="password")
+            if st.button("UnLock"):
+                st.session_state["parent_ok"] = (inp == required)
+            if not st.session_state["parent_ok"]:
+                st.stop()
+
+    colL, colR = st.columns([1, 1.4])
+    with colL:
+        kid_label = st.selectbox("お子さんを選択", list(kid_map.keys()))
+        kid_id = kid_map[kid_label]
+        kid_name = kid_label.split("（")[0]
+        target_date = st.date_input("対象日", date.today())
+
+    # audience のインタラクティブ切替（任意）
+    with st.expander("🎛 表示オプション"):
+        forced_audience = st.selectbox("audienceフィルタ", ["自動（parent）", "child", "parent", "both"], index=0)
+
+    gdf = goals_for_kid(kid_id, viewer="parent")
+    if forced_audience != "自動（parent）":
+        gdf = goals_for_kid(kid_id, viewer=forced_audience)
+
+    # 追加: 未承認だけ表示のフィルタ
+    show_only_pending = st.checkbox("未承認だけ表示", value=False)
+
+    # 当日/過去日のチェック状況をまとめて取得
+    df_all = df_checkins()
+    target_iso = target_date.isoformat()
+
+    state_map = {}  # goal_id -> (child_checked, parent_approved)
+    for _, g in gdf.iterrows():
+        ch, ap = (False, False)
+        if target_date == date.today():
+            ch, ap = today_check_state(kid_id, g["id"])
+        else:
+            if not df_all.empty:
+                mask = (
+                    (df_all["date"] == target_iso) &
+                    (df_all["kid_id"] == kid_id) &
+                    (df_all["goal_id"] == g["id"])
+                )
+                if mask.any():
+                    r = df_all[mask].iloc[0]
+                    ch, ap = bool(r["child_checked"]), bool(r["parent_approved"])
+        state_map[g["id"]] = (ch, ap)
+
+    # 未承認だけ表示
+    if show_only_pending:
+        keep_ids = [gid for gid, (ch, ap) in state_map.items() if ch and not ap]
+        gdf = gdf[gdf["id"].isin(keep_ids)].reset_index(drop=True)
+
+    # 一括承認
+    if st.button("表示中の目標を一括承認する"):
+        for _, g in gdf.iterrows():
+            ch, ap = state_map.get(g["id"], (False, False))
+            if ch and not ap:
+                upsert_checkin(
+                    target_iso, kid_id, kid_name,
+                    g["id"], g["title"],
+                    set_parent=True,
+                    points=int(g["points"])
+                )
+        st.success("一括承認しました。")
+        st.cache_data.clear()
+        st.experimental_rerun()
+
+    if gdf.empty:
+        st.info("まだ目標が登録されていません。")
+    else:
+        st.subheader(f"{kid_name} のチェック状況（{target_date.isoformat()}）")
+        for _, g in gdf.iterrows():
             ch, ap = state_map.get(g["id"], (False, False))
             c1, c2, c3 = st.columns([2.5, 1.2, 1])
             c1.write(f'• {g["title"]}（{int(g["points"])}点）')
@@ -361,7 +469,6 @@ if role == "子ども":
             btn_text = "承認取消" if ap else "承認する"
             btn_key = f"approve_{g['id']}"
 
-            # 承認ボタン処理（2段階確認付き）
             if c3.button(btn_text, key=btn_key):
                 confirm_key = f"confirm_unapprove_{g['id']}"
                 if ap and not st.session_state.get(confirm_key):
@@ -372,143 +479,43 @@ if role == "子ども":
                     upsert_checkin(
                         target_iso, kid_id, kid_name,
                         g["id"], g["title"],
-                        set_parent=not ap,
+                        set_parent=not ap,  # トグル
                         points=int(g["points"])
                     )
                     st.experimental_rerun()
-
-            # 今月の合計（親承認済みのみ）
-            ym = date.today().strftime("%Y-%m")
-            total = monthly_total(kid_id, ym)
-            st.metric("今月の合計ポイント（承認済）", f"{total} 点")
-
-# --- 親画面 ---
-else:
-    # 親ロック（簡易）
-    ok = True
-    try:
-        required = st.secrets.get("parent_pass", "")
-    except Exception:
-        required = ""
-    if required:
-        if "parent_ok" not in st.session_state:
-            st.session_state.parent_ok = False
-        if not st.session_state.parent_ok:
-            inp = st.text_input("親パスコードを入力してください", type="password")
-            if st.button("UnLock"):
-                st.session_state.parent_ok = (inp == required)
-            if not st.session_state.parent_ok:
-                st.stop()
-
-    colL, colR = st.columns([1,1.4])
-    with colL:
-        kid_label = st.selectbox("お子さんを選択", list(kid_map.keys()))
-        kid_id = kid_map[kid_label]
-        kid_name = kid_label.split("（")[0]
-        target_date = st.date_input("対象日", date.today())
-
-    gdf = goals_for_kid(kid_id, viewer="parent")
-        # 追加: 未承認だけ表示のフィルタ
-    show_only_pending = st.checkbox("未承認だけ表示", value=False)
-
-    # 当日/過去日のチェック状況をまとめて取得
-    df = df_checkins()
-    target_iso = target_date.isoformat()
-
-    # 当日・過去日どちらでも、表示時点の child_checked / parent_approved を算出
-    # （後続のループで使い回すために辞書化）
-    state_map = {}  # (goal_id) -> (child_checked, parent_approved)
-    for _, g in gdf.iterrows():
-        btn_text = "承認取消" if ap else "承認する"
-        btn_key = f"approve_{g['id']}"
-         if c3.button(btn_text, key=btn_key):
-             # 取り消し時は確認ダイアログ（2段階）
-             confirm_key = f"confirm_unapprove_{g['id']}"
-             if ap and not st.session_state.get(confirm_key):
-                 st.session_state[confirm_key] = True
-                 st.warning("本当に承認を取り消しますか？もう一度ボタンを押すと実行されます。")
-             else:
-                 # 実行
-                 st.session_state.pop(confirm_key, None)
-                 upsert_checkin(
-                     target_iso, kid_id, kid_name,
-                     g["id"], g["title"],
-                     set_parent=not ap,   # トグル
-                     points=int(g["points"])
-                 )
-                 st.experimental_rerun()
-
-
-    # 未承認だけ表示が ON なら gdf を絞り込む
-    if show_only_pending:
-        keep_ids = [gid for gid, (ch, ap) in state_map.items() if ch and not ap]
-        gdf = gdf[gdf["id"].isin(keep_ids)].reset_index(drop=True)
-
-    # 追加: 一括承認ボタン
-    if st.button("表示中の目標を一括承認する"):
-        for _, g in gdf.iterrows():
-            ch, ap = state_map.get(g["id"], (False, False))
-            # 子がチェック済みで未承認なら承認する
-            if ch and not ap:
-                upsert_checkin(
-                    target_iso, kid_id, kid_name,
-                    g["id"], g["title"],
-                    set_parent=True,
-                    points=int(g["points"])
-                )
-        st.success("一括承認しました。")
-        st.cache_data.clear()  
-        st.experimental_rerun()
-
-    if gdf.empty:
-        st.info("まだ目標が登録されていません。")
-    else:
-        st.subheader(f"{kid_name} のチェック状況（{target_date.isoformat()}）")
-
-    for _, g in gdf.iterrows():
-        ch, ap = state_map.get(g["id"], (False, False))
-        c1, c2, c3 = st.columns([2.5, 1.2, 1])
-        c1.write(f'• {g["title"]}（{int(g["points"])}点）')
-        c2.write("自己チェック" if ch else "未チェック")
-        btn_text = "承認取消" if ap else "承認する"
-        if c3.button(btn_text, key=f"approve_{g['id']}"):
-            upsert_checkin(
-                target_iso, kid_id, kid_name,   # ← target_date.isoformat() の代わりに target_iso 変数を使用
-                g["id"], g["title"],
-                set_parent=not ap,  # トグル
-                points=int(g["points"])
-            )
-            st.experimental_rerun()
-
-    if c3.button(btn_text, key=f"approve_{g['id']}"):
-    if ap and not st.session_state.get(f"confirm_unapprove_{g['id']}"):
-        st.session_state[f"confirm_unapprove_{g['id']}"] = True
-        st.warning("本当に承認を取り消しますか？もう一度ボタンを押すと実行されます。")
-    else:
-        upsert_checkin(...)
-        st.session_state.pop(f"confirm_unapprove_{g['id']}", None)
-        st.experimental_rerun()
-
 
     # 合計表示
     ym = target_date.strftime("%Y-%m")
     total = monthly_total(kid_id, ym)
     st.metric(f"{kid_name} の {ym} 合計ポイント（承認済）", f"{total} 点")
 
-    ymd = target_date.strftime("%Y-%m-%d")
-    cache_daily_total(kid_id, ymd, total)
 
-    with st.expander("🎛 表示オプション"):
-        # audience 選択（親画面の見た目を試す用途）
-        forced_audience = st.selectbox("audienceフィルタ", ["自動（parent）", "child", "parent", "both"], index=0)
-    if forced_audience == "自動（parent）":
-        gdf = goals_for_kid(kid_id, viewer="parent")
-    else:
-        gdf = goals_for_kid(kid_id, viewer=forced_audience)
+# ============ 便利ツール ============
+def cache_daily_total(kid_id: str, ymd: str, total_points: int):
+    """任意：kids シートに日別合計の列 total_YYYYMMDD を追加して保存する"""
+    ws = ws_kids()
+    vals = ws.get_all_values()
+    headers = vals[0] if vals else []
+    col_name = f"total_{ymd.replace('-', '')}"
+    if col_name not in headers:
+        headers.append(col_name)
+        ws.update("1:1", [headers])
+    rows = vals[1:]
+    try:
+        idx = [r[0] for r in rows].index(kid_id)  # id 列が先頭前提
+        r = idx + 2
+        c = headers.index(col_name) + 1
+        ws.update_cell(r, c, total_points)
+    except ValueError:
+        pass
+
+def df_to_csv_download(df, filename):
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    st.download_button("CSVをダウンロード", data=buf.getvalue(), file_name=filename, mime="text/csv")
 
 
-st.caption("データは Google Sheets の 'kids' 'goals' 'checkins' を使用します。")
-
+# ============ 管理 & エクスポート ============
 with st.expander("🛠 管理（メンテナンス）"):
     col_a, col_b = st.columns(2)
     if col_a.button("ヘッダ再生成 / シート検診"):
@@ -524,37 +531,14 @@ with st.expander("🛠 管理（メンテナンス）"):
             ws.clear()
             ws.update("1:1", [CHECKINS_H])
             if not df.empty:
-                ws.update(f"A2", [df[h] for h in CHECKINS_H])
+                rows = df[CHECKINS_H].astype(str).fillna("").values.tolist()
+                ws.update("A2", rows)
         st.success("checkins の空行除去完了")
         st.cache_data.clear()
-
-def cache_daily_total(kid_id: str, ymd: str, total_points: int):
-    ws = ws_kids()
-    vals = ws.get_all_values()
-    headers = vals[0] if vals else []
-    # “total_YYYYMMDD” という列が無ければ作成
-    col_name = f"total_{ymd.replace('-', '')}"
-    if col_name not in headers:
-        headers.append(col_name)
-        ws.update("1:1", [headers])
-    # 行の特定
-    rows = vals[1:]
-    try:
-        idx = [r[0] for r in rows].index(kid_id)  # id 列が先頭前提
-        r = idx + 2
-        c = headers.index(col_name) + 1
-        ws.update_cell(r, c, total_points)
-    except ValueError:
-        pass
-
-import io
-def df_to_csv_download(df, filename):
-    buf = io.StringIO()
-    df.to_csv(buf, index=False)
-    st.download_button("CSVをダウンロード", data=buf.getvalue(), file_name=filename, mime="text/csv")
 
 with st.expander("⬇️ データのエクスポート"):
     df_to_csv_download(df_kids(), "kids.csv")
     df_to_csv_download(df_goals(), "goals.csv")
     df_to_csv_download(df_checkins(), "checkins.csv")
 
+st.caption("データは Google Sheets の 'kids' 'goals' 'checkins' を使用します。")
