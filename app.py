@@ -198,7 +198,9 @@ def df_checkins():
     if "points" in df.columns:
         df["points"] = pd.to_numeric(df["points"], errors="coerce").fillna(0).astype(int)
     for b in ["child_checked", "parent_approved"]:
-        df[b] = df[b].astype(str).str.lower().isin(["true","1","yes"])
+        if b in df.columns:
+            df[b] = df[b].astype(str).str.lower().isin(["true","1","yes"])
+            
     return df[CHECKINS_H]
 
 def today_check_state(kid_id, goal_id):
